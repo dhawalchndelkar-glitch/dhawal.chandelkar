@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, Component, ErrorInfo, ReactNode } from "react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -7,21 +7,52 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, ArrowRight, Globe, Image as ImageIcon, CheckCircle2, AlertCircle, Loader2, Upload, X, FileVideo, FileImage } from "lucide-react";
+import { Sparkles, ArrowRight, Globe, Image as ImageIcon, CheckCircle2, AlertCircle, Loader2, Upload, X, FileVideo, FileImage, FileCode } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { analyzeAd, generatePersonalization, type AdAnalysis, type PersonalizationPlan, type FileData } from "@/src/lib/gemini";
+
+// Error Boundary Component
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error("ErrorBoundary caught an error", error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-8 text-center space-y-4">
+          <AlertCircle className="w-12 h-12 text-destructive mx-auto" />
+          <h2 className="text-2xl font-bold">Something went wrong</h2>
+          <p className="text-muted-foreground">{this.state.error?.message}</p>
+          <Button onClick={() => window.location.reload()}>Reload App</Button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export default function Personalizer() {
   const [adCreative, setAdCreative] = useState("");
   const [adFile, setAdFile] = useState<{ base64: string; mimeType: string; name: string; preview: string } | null>(null);
   const [landingPageUrl, setLandingPageUrl] = useState("");
+  const [landingPageFile, setLandingPageFile] = useState<{ content: string; name: string } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [step, setStep] = useState<"idle" | "analyzing-ad" | "fetching-lp" | "personalizing">("idle");
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PersonalizationPlan | null>(null);
   const [adAnalysis, setAdAnalysis] = useState<AdAnalysis | null>(null);
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAdFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
       if (file.size > 10 * 1024 * 1024) {
@@ -42,14 +73,31 @@ export default function Personalizer() {
     }
   };
 
-  const removeFile = () => {
+  const handleLPFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const content = event.target?.result as string;
+        setLandingPageFile({ content, name: file.name });
+        setLandingPageUrl(""); // Clear URL if file is uploaded
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const removeAdFile = () => {
     if (adFile?.preview) URL.revokeObjectURL(adFile.preview);
     setAdFile(null);
   };
 
+  const removeLPFile = () => {
+    setLandingPageFile(null);
+  };
+
   const handlePersonalize = async () => {
-    if ((!adCreative && !adFile) || !landingPageUrl) {
-      setError("Please provide an ad creative (text or file) and a landing page URL.");
+    if ((!adCreative && !adFile) || (!landingPageUrl && !landingPageFile)) {
+      setError("Please provide an ad creative and a landing page (URL or file).");
       return;
     }
 
@@ -65,24 +113,34 @@ export default function Personalizer() {
       const analysis = await analyzeAd(adCreative, adCreative.startsWith("http"), fileData);
       setAdAnalysis(analysis);
 
-      // Step 2: Fetch Landing Page
-      setStep("fetching-lp");
-      const lpResponse = await fetch("/api/fetch-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: landingPageUrl }),
-      });
-      
-      if (!lpResponse.ok) {
-        const errData = await lpResponse.json();
-        throw new Error(errData.error || "Failed to fetch landing page.");
+      // Step 2: Fetch/Get Landing Page
+      let html = "";
+      if (landingPageFile) {
+        html = landingPageFile.content;
+      } else {
+        setStep("fetching-lp");
+        const lpResponse = await fetch("/api/fetch-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: landingPageUrl }),
+        });
+        
+        if (!lpResponse.ok) {
+          const errData = await lpResponse.json();
+          throw new Error(errData.error || "Failed to fetch landing page.");
+        }
+        
+        const data = await lpResponse.json();
+        html = data.html;
       }
-      
-      const { html } = await lpResponse.json();
+
+      if (!html || html.trim().length === 0) {
+        throw new Error("The landing page content is empty. Please try a different URL or upload an HTML file.");
+      }
 
       // Step 3: Personalize
       setStep("personalizing");
-      const personalization = await generatePersonalization(analysis, html, landingPageUrl);
+      const personalization = await generatePersonalization(analysis, html, landingPageUrl || landingPageFile?.name || "");
       setResult(personalization);
       
       setStep("idle");
@@ -95,7 +153,9 @@ export default function Personalizer() {
   };
 
   return (
-    <div className="space-y-8 max-w-5xl mx-auto p-4">
+    <ErrorBoundary>
+      <div className="space-y-8 max-w-5xl mx-auto p-4">
+        {/* ... (rest of the component) */}
       <div className="text-center space-y-2">
         <h1 className="text-4xl font-bold tracking-tight text-foreground">Personalize Your Landing Page</h1>
         <p className="text-muted-foreground text-lg">Align your landing page with your ad creative in seconds using AI.</p>
@@ -145,7 +205,7 @@ export default function Personalizer() {
                     type="file" 
                     className="hidden" 
                     accept="image/*,video/*" 
-                    onChange={handleFileChange}
+                    onChange={handleAdFileChange}
                   />
                 </label>
               </div>
@@ -155,7 +215,7 @@ export default function Personalizer() {
                   variant="destructive"
                   size="icon"
                   className="absolute -top-2 -right-2 w-6 h-6 rounded-full opacity-0 group-hover:opacity-100 transition-opacity z-10"
-                  onClick={removeFile}
+                  onClick={removeAdFile}
                 >
                   <X className="w-4 h-4" />
                 </Button>
@@ -194,9 +254,61 @@ export default function Personalizer() {
                 type="url"
                 placeholder="https://yourbrand.com/landing-page"
                 value={landingPageUrl}
-                onChange={(e) => setLandingPageUrl(e.target.value)}
+                onChange={(e) => {
+                  setLandingPageUrl(e.target.value);
+                  setLandingPageFile(null);
+                }}
               />
             </div>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">Or upload HTML</span>
+              </div>
+            </div>
+
+            {!landingPageFile ? (
+              <div className="flex items-center justify-center w-full">
+                <label className="flex flex-col items-center justify-center w-full h-24 border-2 border-dashed rounded-lg cursor-pointer bg-muted/50 hover:bg-muted transition-colors">
+                  <div className="flex flex-col items-center justify-center pt-4 pb-4">
+                    <FileCode className="w-6 h-6 mb-2 text-muted-foreground" />
+                    <p className="text-xs text-muted-foreground">
+                      <span className="font-semibold">Click to upload HTML</span>
+                    </p>
+                  </div>
+                  <input 
+                    type="file" 
+                    className="hidden" 
+                    accept=".html,.htm" 
+                    onChange={handleLPFileChange}
+                  />
+                </label>
+              </div>
+            ) : (
+              <div className="relative rounded-lg border p-2 bg-muted/30 group">
+                <Button
+                  variant="destructive"
+                  size="icon"
+                  className="absolute -top-2 -right-2 w-6 h-6 rounded-full opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                  onClick={removeLPFile}
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded bg-background border flex items-center justify-center">
+                    <FileCode className="w-5 h-5 text-primary" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate">{landingPageFile.name}</p>
+                  </div>
+                  <CheckCircle2 className="w-5 h-5 text-green-500 mr-2" />
+                </div>
+              </div>
+            )}
+
             <Button 
               className="w-full h-12 text-lg font-semibold group" 
               onClick={handlePersonalize}
@@ -235,7 +347,7 @@ export default function Personalizer() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {result && (
+        {(isLoading || result) && (
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -251,22 +363,32 @@ export default function Personalizer() {
                     <CardTitle className="text-lg">Ad Analysis</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div>
-                      <Label className="text-xs uppercase text-muted-foreground">Target Audience</Label>
-                      <p className="text-sm font-medium">{adAnalysis?.targetAudience}</p>
-                    </div>
-                    <div>
-                      <Label className="text-xs uppercase text-muted-foreground">Tone & Style</Label>
-                      <p className="text-sm font-medium">{adAnalysis?.tone} • {adAnalysis?.visualStyle}</p>
-                    </div>
-                    <div>
-                      <Label className="text-xs uppercase text-muted-foreground">Key Benefits</Label>
-                      <div className="flex flex-wrap gap-2 mt-1">
-                        {adAnalysis?.keyBenefits.map((benefit, i) => (
-                          <Badge key={i} variant="secondary">{benefit}</Badge>
-                        ))}
+                    {isLoading && !adAnalysis ? (
+                      <div className="space-y-4">
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-4 w-3/4" />
+                        <Skeleton className="h-8 w-full" />
                       </div>
-                    </div>
+                    ) : (
+                      <>
+                        <div>
+                          <Label className="text-xs uppercase text-muted-foreground">Target Audience</Label>
+                          <p className="text-sm font-medium">{adAnalysis?.targetAudience}</p>
+                        </div>
+                        <div>
+                          <Label className="text-xs uppercase text-muted-foreground">Tone & Style</Label>
+                          <p className="text-sm font-medium">{adAnalysis?.tone} • {adAnalysis?.visualStyle}</p>
+                        </div>
+                        <div>
+                          <Label className="text-xs uppercase text-muted-foreground">Key Benefits</Label>
+                          <div className="flex flex-wrap gap-2 mt-1">
+                            {adAnalysis?.keyBenefits.map((benefit, i) => (
+                              <Badge key={i} variant="secondary">{benefit}</Badge>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </CardContent>
                 </Card>
 
@@ -278,14 +400,22 @@ export default function Personalizer() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <ul className="space-y-2">
-                      {result.croImprovements.map((imp, i) => (
-                        <li key={i} className="text-sm flex gap-2">
-                          <span className="text-primary font-bold">•</span>
-                          {imp}
-                        </li>
-                      ))}
-                    </ul>
+                    {isLoading && !result ? (
+                      <div className="space-y-2">
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-4 w-full" />
+                      </div>
+                    ) : (
+                      <ul className="space-y-2">
+                        {result?.croImprovements.map((imp, i) => (
+                          <li key={i} className="text-sm flex gap-2">
+                            <span className="text-primary font-bold">•</span>
+                            {imp}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </CardContent>
                 </Card>
               </div>
@@ -306,7 +436,7 @@ export default function Personalizer() {
                       <div className="w-3 h-3 rounded-full bg-green-400" />
                     </div>
                     <div className="flex-1 mx-4 bg-background rounded px-3 py-1 text-xs text-muted-foreground truncate">
-                      {landingPageUrl}
+                      {landingPageUrl || landingPageFile?.name}
                     </div>
                   </div>
 
@@ -317,66 +447,93 @@ export default function Personalizer() {
                       <div className="absolute inset-0 bg-[radial-gradient(#000_1px,transparent_1px)] [background-size:20px_20px]" />
                     </div>
 
-                    <div className="relative z-10 max-w-2xl text-center space-y-6">
-                      <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.2 }}
-                      >
-                        <Badge className="mb-4 bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">
-                          Personalized for you
-                        </Badge>
-                        <h1 className="text-5xl font-extrabold tracking-tight leading-tight">
-                          {result.newHeadline}
-                        </h1>
-                      </motion.div>
+                    {isLoading && !result ? (
+                      <div className="relative z-10 w-full max-w-2xl text-center space-y-6">
+                        <Skeleton className="h-6 w-32 mx-auto" />
+                        <Skeleton className="h-16 w-full" />
+                        <Skeleton className="h-8 w-3/4 mx-auto" />
+                        <div className="flex gap-4 justify-center pt-4">
+                          <Skeleton className="h-14 w-40 rounded-full" />
+                          <Skeleton className="h-14 w-40 rounded-full" />
+                        </div>
+                      </div>
+                    ) : result ? (
+                      <div className="relative z-10 max-w-2xl text-center space-y-6">
+                        <motion.div
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: 0.2 }}
+                        >
+                          <Badge className="mb-4 bg-primary/10 text-primary hover:bg-primary/20 border-primary/20">
+                            Personalized for you
+                          </Badge>
+                          <h1 className="text-5xl font-extrabold tracking-tight leading-tight">
+                            {result.newHeadline}
+                          </h1>
+                        </motion.div>
 
-                      <motion.p
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.4 }}
-                        className="text-xl text-gray-600"
-                      >
-                        {result.newSubheadline}
-                      </motion.p>
+                        <motion.p
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: 0.4 }}
+                          className="text-xl text-gray-600"
+                        >
+                          {result.newSubheadline}
+                        </motion.p>
 
-                      <motion.div
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ delay: 0.6 }}
-                        className="flex flex-col sm:flex-row gap-4 justify-center pt-4"
-                      >
-                        <Button size="lg" className="h-14 px-8 text-lg font-bold rounded-full shadow-xl hover:scale-105 transition-transform">
-                          {result.newCtaText}
-                          <ArrowRight className="ml-2 w-5 h-5" />
-                        </Button>
-                        <Button size="lg" variant="outline" className="h-14 px-8 text-lg font-medium rounded-full">
-                          Learn More
-                        </Button>
-                      </motion.div>
-                    </div>
+                        <motion.div
+                          initial={{ opacity: 0, y: 20 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{ delay: 0.6 }}
+                          className="flex flex-col sm:flex-row gap-4 justify-center pt-4"
+                        >
+                          <Button size="lg" className="h-14 px-8 text-lg font-bold rounded-full shadow-xl hover:scale-105 transition-transform">
+                            {result.newCtaText}
+                            <ArrowRight className="ml-2 w-5 h-5" />
+                          </Button>
+                          <Button size="lg" variant="outline" className="h-14 px-8 text-lg font-medium rounded-full">
+                            Learn More
+                          </Button>
+                        </motion.div>
+                      </div>
+                    ) : null}
                   </div>
 
                   {/* Reasoning & Visual Direction Section */}
                   <div className="bg-muted/50 p-8 border-t grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div>
-                      <h3 className="font-bold mb-2 flex items-center gap-2">
-                        <Sparkles className="w-4 h-4 text-primary" />
-                        AI Reasoning
-                      </h3>
-                      <p className="text-sm text-muted-foreground leading-relaxed italic">
-                        "{result.personalizationReasoning}"
-                      </p>
-                    </div>
-                    <div>
-                      <h3 className="font-bold mb-2 flex items-center gap-2 text-primary">
-                        <ImageIcon className="w-4 h-4" />
-                        Visual Direction
-                      </h3>
-                      <p className="text-sm text-muted-foreground leading-relaxed">
-                        <span className="font-semibold text-foreground">Recommended Hero Image:</span> {result.heroImagePrompt}
-                      </p>
-                    </div>
+                    {isLoading && !result ? (
+                      <>
+                        <div className="space-y-2">
+                          <Skeleton className="h-4 w-32" />
+                          <Skeleton className="h-4 w-full" />
+                        </div>
+                        <div className="space-y-2">
+                          <Skeleton className="h-4 w-32" />
+                          <Skeleton className="h-4 w-full" />
+                        </div>
+                      </>
+                    ) : result ? (
+                      <>
+                        <div>
+                          <h3 className="font-bold mb-2 flex items-center gap-2">
+                            <Sparkles className="w-4 h-4 text-primary" />
+                            AI Reasoning
+                          </h3>
+                          <p className="text-sm text-muted-foreground leading-relaxed italic">
+                            "{result.personalizationReasoning}"
+                          </p>
+                        </div>
+                        <div>
+                          <h3 className="font-bold mb-2 flex items-center gap-2 text-primary">
+                            <ImageIcon className="w-4 h-4" />
+                            Visual Direction
+                          </h3>
+                          <p className="text-sm text-muted-foreground leading-relaxed">
+                            <span className="font-semibold text-foreground">Recommended Hero Image:</span> {result.heroImagePrompt}
+                          </p>
+                        </div>
+                      </>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -385,5 +542,6 @@ export default function Personalizer() {
         )}
       </AnimatePresence>
     </div>
-  );
+  </ErrorBoundary>
+);
 }

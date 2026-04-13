@@ -15,26 +15,37 @@ async function startServer() {
   // API route to fetch external URL content
   app.post("/api/fetch-url", async (req, res) => {
     const { url } = req.body;
+    console.log(`[Server] Fetching URL: ${url}`);
+    
     if (!url) {
       return res.status(400).json({ error: "URL is required" });
     }
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+
     try {
       const response = await fetch(url, {
+        signal: controller.signal,
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
       });
       
+      clearTimeout(timeout);
+
       if (!response.ok) {
-        throw new Error(`Failed to fetch URL: ${response.statusText}`);
+        console.error(`[Server] Fetch failed: ${response.status} ${response.statusText}`);
+        throw new Error(`Failed to fetch URL: ${response.statusText} (${response.status})`);
       }
 
       const html = await response.text();
+      console.log(`[Server] Successfully fetched ${html.length} characters from ${url}`);
       res.json({ html });
     } catch (error: any) {
-      console.error("Error fetching URL:", error);
-      res.status(500).json({ error: error.message });
+      clearTimeout(timeout);
+      console.error("[Server] Error fetching URL:", error);
+      res.status(500).json({ error: error.name === 'AbortError' ? 'Request timed out' : error.message });
     }
   });
 
